@@ -20,9 +20,13 @@ jobs:
     runs-on: macos-15
     strategy:
       fail-fast: false
+      # We only seem to get one macOS runner at a time, and jobs that wait for a runner for 15 minutes
+      # get cancelled, so we run the variants one after the other.
+      max-parallel: 1
       matrix:
         # See `configure` in ci/genmc-macos-debug.sh for what each variant changes.
-        variant: [homebrew-llvm, apple-O0, apple-asan, apple-no-jemalloc]
+        # (`apple-O0` is also supported, but already ran.)
+        variant: [apple-asan, homebrew-llvm, apple-no-jemalloc]
     env:
       HOST_TARGET: aarch64-apple-darwin
       CARGO_INCREMENTAL: 0
