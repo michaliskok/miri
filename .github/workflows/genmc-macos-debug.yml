@@ -25,8 +25,9 @@ jobs:
       max-parallel: 1
       matrix:
         # See `configure` in ci/genmc-macos-debug.sh for what each variant changes.
-        # (`apple-O0` is also supported, but already ran.)
-        variant: [apple-asan, homebrew-llvm, apple-no-jemalloc]
+        # (`apple-O0`, `apple-asan`, `apple-no-jemalloc`, `homebrew-llvm` and `apple-deque` are
+        # also supported.)
+        variant: [apple-ilist-dtor]
     env:
       HOST_TARGET: aarch64-apple-darwin
       CARGO_INCREMENTAL: 0
@@ -46,6 +47,11 @@ jobs:
           xcodebuild -version
           "${CXX:-clang++}" --version
           git diff --stat
+
+      # Expected with Apple's toolchain: the `= default` destructor breaks, the user-provided one not.
+      - name: "relocation probe (Apple clang + libc++)"
+        continue-on-error: true
+        run: ci/genmc-macos-debug.sh probe
 
       - name: build Miri
         run: ./miri build --features=expensive-consistency-checks,genmc

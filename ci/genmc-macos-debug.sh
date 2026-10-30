@@ -4,6 +4,7 @@
 # Usage:
 #   ci/genmc-macos-debug.sh configure <variant>  set up the build environment for a variant (see below)
 #   ci/genmc-macos-debug.sh build-info           print how GenMC and Miri were actually built
+#   ci/genmc-macos-debug.sh probe                check whether Apple's toolchain memcpy's ilists in vectors
 #   ci/genmc-macos-debug.sh direct <test.rs>     run one test via `./miri run`
 #   ci/genmc-macos-debug.sh suite <filter>       run `./miri test <filter>` (uses MIRIFLAGS from the environment)
 #
@@ -17,6 +18,16 @@ GENMC_FLAGS="-Zmiri-genmc -Zmiri-disable-stacked-borrows -Zmiri-genmc-print-genm
 # Append `VAR=value` to the environment of all later steps.
 set_env() {
   echo "$1=$2" | tee -a "$GITHUB_ENV"
+}
+
+# Clone GenMC at the commit pinned in genmc-sys/build.rs and print its path.
+clone_genmc() {
+  local commit src
+  commit=$(grep -oE 'GENMC_COMMIT: &str = "[0-9a-f]+"' genmc-sys/build.rs | grep -oE '[0-9a-f]{40}')
+  src="$RUNNER_TEMP/genmc"
+  git clone --quiet https://github.com/MPI-SWS/genmc.git "$src" >&2 || return 1
+  git -C "$src" checkout --quiet "$commit" >&2 || return 1
+  echo "$src"
 }
 
 # Make Miri use the system allocator for C/C++ code (and everything else) instead of jemalloc.
@@ -62,6 +73,30 @@ configure() {
     apple-no-jemalloc)
       # Control for apple-asan: only switch the allocator.
       disable_jemalloc_override
+      ;;
+    apple-deque)
+      # Apple clang, with GenMC patched to keep the per-thread po-lists in a std::deque.
+      # Apple's libc++ (LLVM 19) grows a std::vector by memcpy'ing elements that AppleClang's
+      # `__is_trivially_relocatable` claims are trivially relocatable, even if they have a
+      # non-trivial move constructor (fixed in libc++ 20 by llvm/llvm-project#124970).
+      # `genmc::ilist` must not be memcpy'd (its nodes point to its sentinel), and a deque
+      # never relocates its elements when growing.
+      local src
+      src=$(clone_genmc) || exit 1
+      perl -pi -e 's{using PoLists = std::vector<PoList>;}{using PoLists = std::deque<PoList>;}; s{^(#include <algorithm>)}{$1\n#include <deque>}' \
+        "$src/genmc/genmc/Execution/ExecutionGraph.hpp"
+      git -C "$src" diff
+      git -C "$src" diff --quiet && { echo "patch did not apply"; exit 1; }
+      set_env GENMC_SRC_PATH "$src"
+      ;;
+    apple-ilist-dtor)
+      # Apple clang, with `genmc::ilist` given a user-provided destructor (so that it is not
+      # trivially relocatable for any compiler) and a static_assert checking exactly that.
+      local src
+      src=$(clone_genmc) || exit 1
+      git -C "$src" apply "$PWD/ci/genmc-ilist-dtor.patch" || exit 1
+      git -C "$src" diff
+      set_env GENMC_SRC_PATH "$src"
       ;;
     *)
       echo "unknown variant: $1"
@@ -116,6 +151,11 @@ case "$1" in
     ;;
   build-info)
     build_info
+    ;;
+  probe)
+    # Does the default toolchain grow a std::vector of ilist-like types with memcpy?
+    xcrun clang++ -std=c++23 -O2 ci/genmc-relocation-probe.cpp -o "$RUNNER_TEMP/probe" || exit 1
+    "$RUNNER_TEMP/probe"
     ;;
   direct)
     run_with_watchdog "${HANG_SECS:-300}" ./miri run --dep $FEATURES "$2" $GENMC_FLAGS
