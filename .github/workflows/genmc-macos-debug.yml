@@ -16,7 +16,13 @@ permissions:
 
 jobs:
   genmc-macos:
+    name: genmc-macos (${{ matrix.variant }})
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # See `configure` in ci/genmc-macos-debug.sh for what each variant changes.
+        variant: [homebrew-llvm, apple-O0, apple-asan, apple-no-jemalloc]
     env:
       HOST_TARGET: aarch64-apple-darwin
       CARGO_INCREMENTAL: 0
@@ -27,49 +33,41 @@ jobs:
         with:
           toolchain_flags: "--host aarch64-apple-darwin"
 
+      - name: configure variant
+        run: ci/genmc-macos-debug.sh configure ${{ matrix.variant }}
+
       - name: toolchain information
         run: |
           sw_vers
-          uname -m
           xcodebuild -version
-          clang --version
-          xcrun --show-sdk-version
-          cmake --version | head -1
+          "${CXX:-clang++}" --version
+          git diff --stat
 
       - name: build Miri
         run: ./miri build --features=expensive-consistency-checks,genmc
 
+      - name: build information
+        run: ci/genmc-macos-debug.sh build-info
+
       # Builds the sysroot and the test dependencies, so the steps below only measure the tests.
       - name: warm up
+        continue-on-error: true
         run: ./miri test --features=expensive-consistency-checks,genmc tests/genmc/pass/std/empty_main.rs
 
-      # Single tests, run directly so that their output is not buffered by ui_test.
-      - name: "direct: litmus/2cowr (failed on CI)"
+      - name: "direct: litmus/2cowr (assertion failure with Apple clang)"
+        id: assertion
         continue-on-error: true
         timeout-minutes: 15
         run: ci/genmc-macos-debug.sh direct tests/genmc/pass/litmus/2cowr.rs
-      - name: "direct: atomics/atomic_ptr_roundtrip (failed on CI)"
-        continue-on-error: true
-        timeout-minutes: 15
-        run: ci/genmc-macos-debug.sh direct tests/genmc/pass/atomics/atomic_ptr_roundtrip.rs
-      - name: "direct: atomics/cas_simple (single-threaded control, passed on CI)"
-        continue-on-error: true
-        timeout-minutes: 15
-        run: ci/genmc-macos-debug.sh direct tests/genmc/pass/atomics/cas_simple.rs
-      - name: "direct: std/spawn_std_threads"
+      - name: "direct: std/spawn_std_threads (hang with Apple clang)"
+        id: hang
         continue-on-error: true
         timeout-minutes: 15
         run: ci/genmc-macos-debug.sh direct tests/genmc/pass/std/spawn_std_threads.rs
 
-      # The whole GenMC suite, as CI runs it. A hung test gets its stack sampled and is killed
-      # after 25 minutes, so ui_test still prints all failure details at the end.
-      - name: "suite: tests/genmc without GC stress"
+      # Only worth running if the variant fixes both problems.
+      - name: "suite: tests/genmc"
+        if: steps.assertion.outcome == 'success' && steps.hang.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 40
-        run: ci/genmc-macos-debug.sh suite tests/genmc
-      - name: "suite: tests/genmc with GC stress (like CI)"
-        continue-on-error: true
-        timeout-minutes: 40
-        env:
-          MIRIFLAGS: -Zmiri-provenance-gc=1
         run: ci/genmc-macos-debug.sh suite tests/genmc
